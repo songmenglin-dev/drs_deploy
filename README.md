@@ -33,15 +33,16 @@ DRS(数据复制软件)高可用集群的全流程自动化部署脚本。
 
 1. **操作系统**:Kylin / UnionTech / BigCloud Enterprise Linux
 2. **控制节点**:能 SSH 到所有目标节点,推荐免密(`ssh_key` 字段)
-3. **磁盘分区**:已在每台目标节点上完成 `/` ≥100G、`/data/cluster` ≥1024G 的分区
-4. **haveged/rngd 补熵服务**:每台目标节点需安装并启动
-5. **目标节点 `/root/package/` 目录**:脚本会自动创建
+3. **haveged/rngd 补熵服务**:每台目标节点需安装并启动
+4. **目标节点 `/root/package/` 目录**:脚本会自动创建
+
+> 硬件规格(CPU / 内存 / 硬盘)由 `phase precheck` 直接探测并强制,不达标会 fatal。
 
 ## 快速开始
 
 ```bash
 # 1. 复制示例 conf 并替换所有 CHANGE_ME
-cp drs_deploy.conf.example drs_deploy.conf
+cp drs_deploy.conf drs_deploy.conf
 vim drs_deploy.conf
 
 # 2. 先做配置校验(不会下发任何命令到目标节点)

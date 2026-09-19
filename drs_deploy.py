@@ -46,6 +46,11 @@ _LOG_REDACT = re.compile(r"(password|ca_phrase|passwd)\s*=\s*\S+")
 # shell 元字符(出现在 conf 字段值中会被外层 bash 解析,需要提前拒绝)
 _SHELL_META = re.compile(r"[;|&$<>()`'\"]")
 
+# 硬性硬件门槛(2026-09-19 用户要求:phase_precheck 直接 fatal,不达标就拦下)
+_MIN_CPU_CORES = 4
+_MIN_MEM_GB = 8
+_MIN_DISK_GB = 300
+
 
 def _safe_for_remote(value: str, key: str) -> str:
     """比 _safe_for_shell 更严:禁止任何 shell 元字符。
@@ -206,15 +211,12 @@ def _ssh_base_args(ip: str) -> List[str]:
 def ssh_run(ip: str, remote_cmd: str, timeout: int = 1800,
             check: bool = True, input_data: Optional[str] = None) -> Tuple[int, str, str]:
     """在远端节点执行命令,返回 (rc, stdout, stderr)。
-    走 ssh 密钥认证(由 ssh_key 配置)。BatchMode=yes 避免无密钥时卡在密码提示。
+    走 ssh 密钥认证(ssh_key 可选:留空走 ssh 默认的 ~/.ssh/id_rsa 等,
+    填了则 -i 显式指定)。BatchMode=yes 避免无密钥时卡在密码提示。
     input_data 会拼到 remote_cmd 后面送进 stdin — 调用方需保证不是把交互式
     答案拼给 bash -s 当脚本执行(那种场景应改用 here-doc)。"""
-    if not _opt_conf("ssh_key", ""):
-        # CLAUDE.md 硬性要求第 4 条:SSH 走密钥认证,不依赖密码提示。
-        # BatchMode=yes 会让任何后续 ssh 因 Permission denied 直接 rc != 0,
-        # 导致所有 phase 神秘失败,所以这里必须 fatal 而不是 warn。
-        fatal("未配置 ssh_key | 修复:在 conf 中填 ssh_key=/path/to/id_rsa "
-              "(并确保公钥已分发到目标节点的 authorized_keys)")
+    # ssh_key 留空时走 ssh 默认行为,BatchMode=yes 保证无密钥时直接 Permission denied,
+    # 不会卡密码提示 — 留空也安全;连通性由 phase_precheck 的 echo OK 兜底。
     cmd = _ssh_base_args(ip) + ["bash", "-s"]
     # 日志脱敏:password/ca_phrase/passwd 值替换成 ***,避免泄露到日志
     preview = _LOG_REDACT.sub(r"\1 = ***", remote_cmd[:200])
@@ -265,6 +267,48 @@ def scp_push(local_path: str, ip: str, remote_path: str) -> None:
 
 
 # === 阶段 0:预检(本地 conf + 软件包 + SSH 连通性)===
+
+
+# 远端硬件探测脚本:输出 "HW:cpu=N mem_mb=N disk_gb=N"。
+# 优先 lsblk 取物理磁盘总容量;若环境无 lsblk,回退到 df --total。
+# stdin 喂给 ssh bash -s,因此可换行,可直接写 shell 语法。
+_HW_PROBE_SCRIPT = r"""printf 'HW:cpu=%s mem_mb=%s disk_gb=%s\n' \
+  "$(nproc)" \
+  "$(free -m | awk '/^Mem:/{print $2}')" \
+  "$(
+    disk_bytes=$(lsblk -bn -d -o SIZE 2>/dev/null | awk 'BEGIN{s=0}{if($1~/^[0-9]+$/)s+=$1}END{print s+0}')
+    if [ "${disk_bytes:-0}" -eq 0 ]; then
+      disk_bytes=$(df -B1 --total 2>/dev/null | awk '/^total/{print $2}')
+    fi
+    echo $(( disk_bytes / 1073741824 ))
+  )"
+"""
+
+
+def _check_hardware(ip: str) -> None:
+    """硬性硬件检测:CPU ≥ _MIN_CPU_CORES 核、内存 ≥ _MIN_MEM_GB GB、硬盘 ≥ _MIN_DISK_GB GB。
+    任一项不达标直接 fatal,避免规格不够时安装到一半才被安装器报错。"""
+    rc, out, _ = ssh_run(ip, _HW_PROBE_SCRIPT, timeout=20, check=False)
+    if rc != 0:
+        fatal(f"[{ip}] 硬件检测命令执行失败 rc={rc} | "
+              f"确保目标节点装有 nproc/free/lsblk 或 df(procps + util-linux)")
+    m = re.search(r"HW:cpu=(\d+)\s+mem_mb=(\d+)\s+disk_gb=(\d+)", out)
+    if not m:
+        fatal(f"[{ip}] 硬件检测输出解析失败: {out.strip()[:200]!r}")
+    cpu, mem_mb, disk_gb = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    mem_gb = (mem_mb + 1023) // 1024  # MB → GB,向上取整(避免 7.99GB 显示成 7)
+    info(f"  [{ip}] 硬件: CPU={cpu}核, 内存={mem_gb}GB({mem_mb}MB), 硬盘={disk_gb}GB")
+    fails = []
+    if cpu < _MIN_CPU_CORES:
+        fails.append(f"CPU {cpu}核 < {_MIN_CPU_CORES}核")
+    if mem_gb < _MIN_MEM_GB:
+        fails.append(f"内存 {mem_gb}GB < {_MIN_MEM_GB}GB")
+    if disk_gb < _MIN_DISK_GB:
+        fails.append(f"硬盘 {disk_gb}GB < {_MIN_DISK_GB}GB")
+    if fails:
+        fatal(f"[{ip}] 硬件不达标: {'; '.join(fails)}")
+
+
 def check_conf() -> None:
     """仅校验 conf 解析 + 必填字段 + IP 合法性(不检查包存在、不探测 SSH)。"""
     info("===== check-conf: 校验 conf 结构 =====")
@@ -350,45 +394,45 @@ def _resolve_packages(package_dir: str) -> None:
 
 
 def phase_precheck() -> None:
-    """完整预检:conf 结构 + 软件包解析 + SSH 连通到所有目标节点。"""
+    """完整预检:conf 结构 + 软件包解析 + SSH 连通 + 硬性硬件检测。"""
     info("===== Phase 0: 预检(precheck) =====")
     check_conf()
 
     # 软件包:从单一 package_dir 按 glob 解析,失败模式见 _resolve_packages
     _resolve_packages(_conf("package_dir"))
 
-    # SSH 连通性(只对配置了 ssh_key 的做连通性测试,避免卡在密码提示)
     key = _opt_conf("ssh_key", "")
+    # ssh_key 可选:留空走 ssh 默认行为(尝试 ~/.ssh/id_rsa 等默认位置/默认名),
+    # 填了则用 -i <key> 显式指定。BatchMode=yes 保证无密钥时直接 Permission denied,
+    # 不会卡密码提示 — 留空也安全。
     if key:
-        info(f"使用 ssh_key={key} 验证连通性")
-        scene = _opt_conf("deploy_scene", "ha").lower()
-        node_ips_raw = _opt_conf("drs_node_ips", "")
-        targets: List[str] = [
-            ip for ip in (
-                _opt_conf("gaussdb_node1_ip"),
-                _opt_conf("gaussdb_node2_ip"),
-                _opt_conf("gaussdb_node3_ip"),
-                _opt_conf("drs_service_primary_ip"),
-                _opt_conf("drs_service_standby_ip") if scene == "ha" else "",
-            ) if ip
-        ]
-        if node_ips_raw:
-            targets += _split_list(node_ips_raw)
-        seen: set = set()
-        for ip in targets:
-            if ip in seen:
-                continue
-            seen.add(ip)
-            rc, out, _ = ssh_run(ip, "echo OK", timeout=15, check=False)
-            if rc != 0:
-                fatal(f"SSH 连通性失败: {ip} | 修复:确认 {key} 已分发到 {ip}:~/.ssh/authorized_keys")
-            info(f"  [{ip}] SSH OK")
+        info(f"使用 ssh_key={key} 验证连通性 + 硬性硬件检测 "
+             f"(门槛: CPU≥{_MIN_CPU_CORES}核 内存≥{_MIN_MEM_GB}GB 硬盘≥{_MIN_DISK_GB}GB)")
     else:
-        # CLAUDE.md 硬性要求第 4 条:SSH 走密钥认证,BatchMode=yes 让 ssh 在无密钥
-        # 时直接 Permission denied,任何 phase 都会神秘失败。这里直接 fatal
-        # 提示操作员补 ssh_key,而不是等到 phase 里再失败。
-        fatal("未配置 ssh_key | 修复:在 conf 中填 ssh_key=/path/to/id_rsa "
-              "(并确保公钥已分发到所有目标节点的 authorized_keys)")
+        info(f"ssh_key 未配置,走 ssh 默认行为验证连通性 + 硬性硬件检测 "
+             f"(门槛: CPU≥{_MIN_CPU_CORES}核 内存≥{_MIN_MEM_GB}GB 硬盘≥{_MIN_DISK_GB}GB)")
+
+    # 聚合所有目标 IP(去重保序):GaussDB + DRS-Service + DRS-Node
+    scene = _opt_conf("deploy_scene", "ha").lower()
+    node_ips_raw = _opt_conf("drs_node_ips", "")
+    raw_targets = [
+        _opt_conf("gaussdb_node1_ip"),
+        _opt_conf("gaussdb_node2_ip"),
+        _opt_conf("gaussdb_node3_ip"),
+        _opt_conf("drs_service_primary_ip"),
+        _opt_conf("drs_service_standby_ip") if scene == "ha" else "",
+    ]
+    if node_ips_raw:
+        raw_targets += _split_list(node_ips_raw)
+    # dict.fromkeys 保序去重(同一节点既是 GaussDB 又是 DRS-Service 也只跑一次)
+    targets: List[str] = list(dict.fromkeys(ip for ip in raw_targets if ip))
+
+    for ip in targets:
+        rc, _, _ = ssh_run(ip, "echo OK", timeout=15, check=False)
+        if rc != 0:
+            fatal(f"SSH 连通性失败: {ip} | 修复:确认 {key} 已分发到 {ip}:~/.ssh/authorized_keys")
+        info(f"  [{ip}] SSH OK")
+        _check_hardware(ip)
 
     info("预检通过")
 

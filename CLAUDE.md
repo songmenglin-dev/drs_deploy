@@ -10,7 +10,7 @@
    - 所有入参(包括密码、IP、路径)在 `drs_deploy.conf` 中显式声明
 
 2. **交付给客户的文档中,不得出现内部参考文档的引用**
-   - `README.md`、`USAGE.md`、`drs_deploy.conf.example` 是客户文档
+   - `README.md`、`USAGE.md`、`drs_deploy.conf` 是客户文档
    - 禁止出现:`PDF`、`HCS`、`安装指南`、`第 X 章`、`表 4-X`、`步骤 X` 等指向内部 PDF 的引用
    - 客户看不到内部 PDF — 任何「参考 PDF X.Y」的描述都会让客户困惑
    - 客户文档要自洽:技术细节直接写出来,而不是「见 PDF 第 X 章」
@@ -73,7 +73,7 @@ drs_deploy/
 2. 改完跑:
    ```bash
    python3 -m py_compile drs_deploy.py                       # 语法检查
-   python3 drs_deploy.py drs_deploy.conf.example --check-conf # conf 结构校验
+   python3 drs_deploy.py drs_deploy.conf --check-conf # conf 结构校验
    ```
 3. 在客户文档中加任何文字前,自查不出现 `PDF`/`HCS`/`安装指南`/`第 X 章`/`表 4-X`/`步骤 X`
 4. 涉及 conf 字段进入 shell 字符串的代码,先过 `_safe_for_remote` / `_safe_for_shell`

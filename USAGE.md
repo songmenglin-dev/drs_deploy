@@ -6,16 +6,20 @@ DRS(数据复制软件)高可用集群的自动化部署脚本使用说明。
 
 | 项 | 要求 |
 |---|---|
-| 控制节点 | 已 `ssh-keygen` 生成密钥,`id_rsa.pub` 已追加到所有目标节点 `~/.ssh/authorized_keys` |
-| 目标节点 OS | Kylin / UnionTech / BigCloud Enterprise Linux |
-| 目标节点磁盘 | 已完成分区(`/ 100G` + `/data/cluster ≥1024G`) |
-| 目标节点补熵服务 | `haveged` / `rngd` 已安装并启动 |
-| 控制节点 Python | ≥ 3.7(只用标准库,无第三方依赖) |
+| 脚本执行 OS 用户 | root |
+| SSH 免密 | 脚本执行所在节点 A 与 5 个待安装 DRS 的目标节点已配好 SSH 免密(例如 A → 各目标节点) |
+| 安装包 | 已上传到 `package_dir` 目录(默认 `/root/package`),共 5 个 tar 包,详见 [2.1](#21-准备安装包) |
 
-## 2. 准备 conf
+其他要求:
+
+- 目标节点 OS:Kylin / UnionTech / BigCloud Enterprise Linux
+- 目标节点补熵服务:`haveged` / `rngd` 已安装并启动
+- 脚本执行所在节点 Python:≥ 3.7(只用标准库,无第三方依赖)
+
+## 2. 准备配置文件
 
 ```bash
-cp drs_deploy.conf.example drs_deploy.conf
+cp drs_deploy.conf drs_deploy.conf
 vim drs_deploy.conf
 ```
 
@@ -32,10 +36,26 @@ drs_service_standby_ip = "10.0.0.2"  # HA 时与 node2 同机
 drs_node_ips = "10.0.0.10,10.0.0.11" # DRS-Node 节点
 gaussdb_installer_tar / gaussdb_metadb_tar / drs_service_tar /
 drs_node_tar / monitor_agent_tar  ← 全部放到 package_dir 下,按 glob 自动匹配
-ssh_key = "/root/.ssh/id_rsa"
+ssh_key = ""   # 留空走 ssh 默认;非默认路径时填绝对路径
 ```
 
-完整字段含义见 `drs_deploy.conf.example` 行内注释。
+完整字段含义见 `drs_deploy.conf` 行内注释。
+
+### 2.1 准备安装包
+
+5 个 tar 全部放到 `package_dir` 目录(默认 `/root/package`),脚本按文件名 glob 自动匹配:
+
+| 包名(glob) | 装到 | 必需 |
+|---|---|---|
+| `GaussDBInstaller_*.tar.gz` | 3 个 GaussDB 节点 | ✓ |
+| `DBS-MetaDB_*_Centralized_*.tar.gz` | 3 个 GaussDB 节点 | ✓ |
+| `DRS-Service-*.tar.gz` | DRS-Service 主/备节点 | ✓ |
+| `DRS-Node-*.tar.gz` | `drs_node_ips` 配置的节点 | 按需 |
+| `Monitor-Agent-*.tar.gz` | 所有节点 | ✓ |
+
+每个 glob 必须 **恰好匹配 1 个**文件,匹配 0 个或多个脚本都会 fatal。
+
+`DBS-MetaDB` 还有 **OS 变种**(Kylin / Bclinux / UnionTech 三选一),文件名里的 OS 必须和目标节点实际 OS 一致,否则安装器会拒收。
 
 ## 3. 部署
 
@@ -72,7 +92,7 @@ python3 drs_deploy.py drs_deploy.conf
 
 | 报错 | 看哪里 |
 |---|---|
-| `SSH 连通性失败` | 控制节点的 `ssh_key` 是否已 `ssh-copy-id` 到目标节点 |
+| `SSH 连通性失败` | 脚本执行所在节点到目标节点的 SSH 免密是否配好 |
 | `installCluster installation is successful.` 未匹配 | `[10.0.0.1]:/data/GaussDBInstaller/install_cluster.log` |
 | DRS-Service 端口 `7443` 未监听 | `[10.0.0.1]:/opt/drs/logs/` 下的 install 日志 |
 | Monitor-Agent 卡在交互 | 脚本已用 heredoc 喂答案;若仍卡,手动到节点跑 `cd /root/package/Monitor-Agent-* && sh install.sh` |
