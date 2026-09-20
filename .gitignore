@@ -20,6 +20,3 @@ env/
 
 # Logs
 *.log
-
-# Local conf (user-specific, do NOT commit the real config)
-drs_deploy.conf
